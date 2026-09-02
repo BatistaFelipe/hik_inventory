@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Relatorio de retencao baixa - DVR Hikvision</title>
+<style>
+ :root{color-scheme:dark}
+ body{background:#141414;color:#eee;font:14px/1.45 system-ui,sans-serif;margin:0;padding:24px}
+ h1{font-size:17px;margin:0 0 16px}
+ .actions{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+ button{background:#2d6cb5;border:0;color:#fff;border-radius:4px;padding:8px 14px;
+        font:inherit;cursor:pointer}
+ button:hover{background:#3a80cf}
+ button.ghost{background:#333}
+ button.danger{background:#8e2b2b}
+ button.danger:hover{background:#a13636}
+ a{color:#4a90d9;text-decoration:none}
+ a:hover{text-decoration:underline}
+ table{border-collapse:collapse;width:100%;background:#1e1e1e;border-radius:6px;overflow:hidden}
+ th,td{padding:9px 12px;text-align:left;border-bottom:1px solid #2b2b2b;font-size:13px}
+ th{background:#252525;color:#bbb;font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+ tr:last-child td{border-bottom:0}
+ tr:hover td{background:#232323}
+ .days{font-weight:600}
+ .days.low{color:#e06c5c}
+ .days.mid{color:#e0a94f}
+ small{color:#8f8f8f;font-size:11px}
+ .empty{color:#888;padding:24px;background:#1e1e1e;border-radius:6px;text-align:center}
+ #count{color:#aaa;font-size:13px}
+</style>
+
+<h1>Relatorio de retencao baixa
+  <a href="/" style="font-size:12px;font-weight:400;margin-left:14px">&larr; Voltar</a>
+</h1>
+
+<div class="actions">
+  <span id="count"></span>
+  <span style="flex:1"></span>
+  <button id="export" class="ghost">Exportar CSV</button>
+  <button id="clear" class="danger">Limpar tudo</button>
+</div>
+
+<div id="content"></div>
+
+<script>
+const content = document.getElementById("content");
+const countEl = document.getElementById("count");
+let cache = [];
+
+// Escape server-provided values before dropping them into innerHTML.
+// The DVR is a network peer, not a trust anchor: name/serial/firmware could
+// contain <script>...</script> from a hostile box on the LAN.
+function escHtml(v){
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function fmt(d){ return d ? escHtml(d) : "-"; }
+
+function daysClass(n){
+  if(n < 7) return "days low";
+  if(n < 15) return "days mid";
+  return "days";
+}
+
+function render(entries){
+  cache = entries;
+  countEl.textContent = entries.length
+    ? `${entries.length} dispositivo(s) com retencao < 30 dias`
+    : "";
+  if(!entries.length){
+    content.innerHTML = `<div class="empty">Nenhum dispositivo registrado.<br>
+      <small>Faca uma verificacao na tela inicial; DVRs com menos de 30 dias
+      de retencao aparecem aqui automaticamente.</small></div>`;
+    return;
+  }
+  const rows = entries.map(e => `
+    <tr>
+      <td>
+        <b>${e.name ? escHtml(e.name) : "(sem nome)"}</b><br>
+        <small>${escHtml(e.host)}:${escHtml(e.port)}</small>
+      </td>
+      <td>${e.model ? escHtml(e.model) : "-"}<br><small>${escHtml(e.firmware || "")}</small></td>
+      <td><small>${e.serial ? escHtml(e.serial) : "-"}</small></td>
+      <td class="${daysClass(e.retention_days)}">${escHtml(e.retention_days)} dias
+        ${e.window_limited ? "<br><small>limite janela</small>" : ""}
+      </td>
+      <td><small>${fmt(e.oldest_recording)}<br>&rarr; ${fmt(e.newest_recording)}</small></td>
+      <td>${escHtml(e.channels || 0)}<br>
+        <small>${escHtml(e.in_use)} uso / ${escHtml(e.empty)} vazios / ${escHtml(e.review)} rev</small>
+      </td>
+      <td><small>${e.last_seen ? escHtml(e.last_seen.replace("T"," ")) : ""}</small></td>
+      <td><button class="ghost" data-key="${escHtml(e.key)}">Remover</button></td>
+    </tr>`).join("");
+  content.innerHTML = `<table>
+    <thead><tr>
+      <th>Dispositivo</th><th>Modelo</th><th>Serial</th>
+      <th>Retencao</th><th>Gravacoes</th><th>Canais</th>
+      <th>Ultima verificacao</th><th></th>
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+  content.querySelectorAll("button[data-key]").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      if(!confirm("Remover este dispositivo do relatorio?")) return;
+      await fetch("/api/relatorio/delete", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({key: btn.dataset.key})
+      });
+      load();
+    });
+  });
+}
+
+async function load(){
+  const r = await fetch("/api/relatorio");
+  const data = await r.json();
+  render(data.entries || []);
+}
+
+document.getElementById("clear").addEventListener("click", async () => {
+  if(!confirm("Apagar todo o relatorio?")) return;
+  await fetch("/api/relatorio/clear", {method:"POST"});
+  load();
+});
+
+document.getElementById("export").addEventListener("click", () => {
+  if(!cache.length) return;
+  const cols = ["name","host","port","model","serial","firmware",
+                "channels","in_use","empty","review","retention_days",
+                "oldest_recording","newest_recording","window_limited",
+                "first_seen","last_seen"];
+  const esc = v => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[",\n;]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+  };
+  const lines = [cols.join(";")].concat(
+    cache.map(e => cols.map(c => esc(e[c])).join(";"))
+  );
+  const blob = new Blob([lines.join("\n")], {type:"text/csv;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "relatorio_retencao_baixa.csv";
+  a.click();
+});
+
+load();
+</script>
+</html>

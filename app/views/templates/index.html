@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="pt-BR">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Verificacao de canais - DVR Hikvision</title>
+<style>
+ :root{color-scheme:dark}
+ body{background:#141414;color:#eee;font:14px/1.45 system-ui,sans-serif;margin:0;padding:24px}
+ h1{font-size:17px;margin:0 0 16px}
+ form{display:flex;flex-wrap:wrap;gap:10px;align-items:flex-end;
+      background:#1e1e1e;padding:16px;border-radius:8px;max-width:900px}
+ label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:#aaa}
+ input{background:#111;border:1px solid #3a3a3a;color:#eee;border-radius:4px;
+       padding:8px 10px;font:inherit;min-width:150px}
+ input:focus{outline:none;border-color:#4a90d9}
+ button{background:#2d6cb5;border:0;color:#fff;border-radius:4px;padding:9px 18px;
+        font:inherit;cursor:pointer}
+ button:hover{background:#3a80cf}
+ button.ghost{background:#333}
+ button:disabled{opacity:.5;cursor:default}
+ #status{margin:16px 0;color:#aaa;font-size:13px}
+ #status.err{color:#e06c5c}
+ #head{margin:16px 0 8px;font-size:15px;font-weight:600}
+ #meta{color:#999;font-size:12px;margin-bottom:16px;display:flex;flex-wrap:wrap;gap:14px}
+ #meta b{color:#ddd;font-weight:600}
+ .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+ figure{margin:0;background:#232323;border-radius:6px;overflow:hidden}
+ .thumb{aspect-ratio:16/9;background:#000;display:flex;align-items:center;
+        justify-content:center;color:#666;font-size:12px}
+ .thumb img{width:100%;height:100%;object-fit:contain}
+ figcaption{padding:8px;display:flex;flex-direction:column;gap:5px}
+ .tag{display:inline-block;padding:2px 7px;border-radius:3px;font-size:11px;
+      width:fit-content;font-weight:600}
+ small{color:#8f8f8f;font-size:11px}
+ .hidden{display:none}
+</style>
+
+<h1>Verificacao de canais — DVR Hikvision
+  <a href="/relatorio" style="font-size:12px;font-weight:400;margin-left:14px;color:#4a90d9">Relatorio (&lt; 30 dias)</a>
+</h1>
+
+<form id="f">
+  <label>IP<input name="host" required placeholder="192.168.2.2"></label>
+  <label>Porta<input name="port" value="8001" style="min-width:80px"></label>
+  <label>Usuario<input name="user" value="admin"></label>
+  <label>Senha<input name="password" type="password" required></label>
+  <button id="go" type="submit">Verificar</button>
+  <button id="again" type="button" class="ghost hidden">Nova busca</button>
+</form>
+
+<div id="status"></div>
+<div id="head"></div>
+<div id="meta"></div>
+<div class="grid" id="grid"></div>
+
+<script>
+const COLORS = {
+  IN_USE:"#27ae60", CAMERA_DOWN:"#c0392b", CAMERA_BLIND:"#d68910",
+  EMPTY:"#555", NO_RECORDING_BUT_VIDEO:"#8e44ad",
+  UNKNOWN:"#34495e", ERROR:"#c0392b"
+};
+
+// Escape server-provided values before dropping them into innerHTML.
+// The DVR is a network peer, not a trust anchor: a hostile box on the LAN
+// could put <script> in deviceName/serial/firmware and pop the operator.
+function esc(v){
+  return String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+const f = document.getElementById("f");
+const grid = document.getElementById("grid");
+const statusEl = document.getElementById("status");
+const headEl = document.getElementById("head");
+const metaEl = document.getElementById("meta");
+const goBtn = document.getElementById("go");
+const againBtn = document.getElementById("again");
+
+let expected = 0, received = 0;
+
+function card(r){
+  const color = COLORS[r.verdict] || "#34495e";
+  const fig = document.createElement("figure");
+  fig.style.order = Number(r.channel) || 0;
+  const rec = r.recorded_days
+    ? `${esc(r.recorded_days)}d grav · ${esc(r.first_recording)} → ${esc(r.last_recording)}`
+    : "sem gravacao";
+  const vl = r.videoloss_enabled === null ? "?" : esc(r.videoloss_enabled);
+  fig.innerHTML = `
+    <div class="thumb">${r.thumb
+      ? `<img src="${esc(r.thumb)}" alt="canal ${esc(r.channel)}">`
+      : "sem resposta"}</div>
+    <figcaption>
+      <b>CH ${esc(String(r.channel).padStart(2,"0"))}</b>
+      <span class="tag" style="background:${color}">${esc(r.verdict)}</span>
+      <small>${rec}</small>
+      <small>videoloss: ${vl}</small>
+    </figcaption>`;
+  return fig;
+}
+
+function reset(){
+  grid.innerHTML = ""; headEl.textContent = ""; metaEl.innerHTML = "";
+  statusEl.textContent = ""; statusEl.className = "";
+  expected = 0; received = 0;
+}
+
+function handle(msg){
+  if(msg.type === "error"){
+    statusEl.textContent = "Erro: " + msg.message;
+    statusEl.className = "err";
+    return;
+  }
+  if(msg.type === "device"){
+    expected = msg.channels.length;
+    headEl.textContent =
+      `${msg.name || "(sem nome)"} — ${msg.host}:${msg.port} — ${msg.model}`;
+    metaEl.innerHTML =
+      `<span>serial <b>${esc(msg.serial)}</b></span>` +
+      `<span>firmware <b>${esc(msg.firmware)}</b></span>` +
+      `<span>canais <b>${esc(expected)}</b></span>`;
+    statusEl.textContent = `Verificando ${expected} canais...`;
+    return;
+  }
+  if(msg.type === "channel"){
+    grid.appendChild(card(msg));
+    received++;
+    statusEl.textContent = `Verificando... ${received}/${expected}`;
+    return;
+  }
+  if(msg.type === "done"){
+    statusEl.textContent =
+      `Concluido — ${msg.in_use} em uso, ${msg.empty} vazios, ` +
+      `${msg.review} para revisar.`;
+    const ret = msg.retention_days
+      ? `${esc(msg.retention_days)} dias (${esc(msg.oldest_recording)} → ${esc(msg.newest_recording)})` +
+        (msg.window_limited
+          ? ` — pode ser maior, consultei so ${esc(msg.window_months)} meses`
+          : "")
+      : "sem gravacao encontrada";
+    metaEl.innerHTML += `<span>retencao <b>${ret}</b></span>`;
+  }
+}
+
+f.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  reset();
+  goBtn.disabled = true;
+  againBtn.classList.add("hidden");
+  statusEl.textContent = "Conectando...";
+
+  const body = Object.fromEntries(new FormData(f));
+  let res;
+  try{
+    res = await fetch("/api/scan", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    });
+  }catch(err){
+    statusEl.textContent = "Erro: " + err;
+    statusEl.className = "err";
+    goBtn.disabled = false;
+    return;
+  }
+
+  // Stream NDJSON so thumbnails appear as each channel finishes.
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, {stream:true});
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for(const l of lines){
+      if(l.trim()) handle(JSON.parse(l));
+    }
+  }
+  if(buf.trim()) handle(JSON.parse(buf));
+
+  goBtn.disabled = false;
+  againBtn.classList.remove("hidden");
+});
+
+againBtn.addEventListener("click", () => {
+  reset();
+  againBtn.classList.add("hidden");
+  f.host.focus();
+  f.host.select();
+});
+</script>
+</html>
