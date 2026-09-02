@@ -5,12 +5,15 @@ listing, recording history and videoLoss configuration. No PUT/POST that
 would mutate device configuration.
 """
 
+import re
 from datetime import date
 from xml.etree import ElementTree as ET
 
 import requests
 
 from app.config import NS, RETENTION_MONTHS, TIMEOUT
+
+_XML_DECL_RE = re.compile(rb"^\s*<\?xml[^?]*\?>")
 
 
 def month_iter(months):
@@ -37,12 +40,41 @@ def _find_channels(root):
     return root.findall(".//VideoInputChannel"), None
 
 
+def _parse_isapi_xml(response, endpoint):
+    """Parse ISAPI XML, working around mislabelled encodings.
+
+    Some Hikvision firmwares declare ``encoding="UTF-8"`` but actually
+    write channel names in cp1252 (e.g. ``Câmara``). The raw bytes fail
+    UTF-8 decoding, so we retry as cp1252 with the XML declaration
+    stripped — ``ET.fromstring`` on a ``str`` uses the string as-is.
+    """
+    try:
+        return ET.fromstring(response.content)
+    except ET.ParseError as exc:
+        try:
+            fallback = _XML_DECL_RE.sub(b"", response.content, count=1)
+            return ET.fromstring(fallback.decode("cp1252"))
+        except (UnicodeDecodeError, ET.ParseError):
+            pass
+
+        ctype = response.headers.get("Content-Type", "?")
+        body = response.content.decode("utf-8", errors="replace")
+        lineno, col = getattr(exc, "position", (0, 0))
+        lines = body.splitlines()
+        offender = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+        raise ET.ParseError(
+            f"{endpoint} XML invalido (status={response.status_code}, "
+            f"content-type={ctype}, erro linha {lineno} col {col}, "
+            f"linha={offender!r}): {exc}"
+        ) from exc
+
+
 def list_channels(base, auth):
     """Discover configured video input channels instead of assuming 1..32."""
     url = f"{base}/ISAPI/System/Video/inputs/channels"
     r = requests.get(url, auth=auth, timeout=TIMEOUT)
     r.raise_for_status()
-    root = ET.fromstring(r.content)
+    root = _parse_isapi_xml(r, "/ISAPI/System/Video/inputs/channels")
     chans, ns = _find_channels(root)
     ids = []
     for ch in chans:
@@ -140,7 +172,7 @@ def device_info(base, auth):
     url = f"{base}/ISAPI/System/deviceInfo"
     r = requests.get(url, auth=auth, timeout=TIMEOUT)
     r.raise_for_status()
-    root = ET.fromstring(r.content)
+    root = _parse_isapi_xml(r, "/ISAPI/System/deviceInfo")
     return {
         "name": root.findtext("h:deviceName", default="", namespaces=NS),
         "model": root.findtext("h:model", default="", namespaces=NS),
