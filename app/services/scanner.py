@@ -85,15 +85,20 @@ def scan_stream(host, port, user, password, on_done=None):
         log.warning("device_info failed for %s: %r", host, exc)
         yield line({"type": "error", "message": f"sem resposta: {_exc_label(exc)}"})
         return
-    except ET.ParseError:
-        yield line({"type": "error", "message": "resposta nao e ISAPI valido"})
+    except ET.ParseError as exc:
+        log.warning("device_info parse failed for %s: %s", host, exc)
+        yield line({"type": "error", "message": f"resposta nao e ISAPI valido: {exc}"})
         return
 
     try:
         channels = list_channels(base, auth)
-    except (requests.RequestException, ET.ParseError) as exc:
-        log.warning("list_channels failed for %s: %r", host, exc)
+    except requests.RequestException as exc:
+        log.warning("list_channels request failed for %s: %r", host, exc)
         yield line({"type": "error", "message": f"falha ao listar canais: {_exc_label(exc)}"})
+        return
+    except ET.ParseError as exc:
+        log.warning("list_channels parse failed for %s: %s", host, exc)
+        yield line({"type": "error", "message": f"falha ao listar canais: {exc}"})
         return
 
     yield line({"type": "device", "host": host, "port": port, "channels": channels, **info})
